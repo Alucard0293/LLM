@@ -4,16 +4,18 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #endif
 
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_null_initializer : enable
+
 #include "mul_mat_vec_base.comp"
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 layout (constant_id = 0) const uint BLOCK_SIZE = 32;
+layout (constant_id = 1) const uint NUM_OUTPUTS = 1;
 
-shared FLOAT_TYPE tmp[BLOCK_SIZE];
-
-void main() {
-    const uint row = gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z;
+void compute_outputs(const uint32_t row, const uint32_t num_outputs) {
     const uint tid = gl_LocalInvocationID.x;
 
     // There are not enough cols to use all threads
@@ -28,29 +30,91 @@ void main() {
 
     const uint y_offset = QUANT_R == 1 ? 1 : QUANT_K/2;
 
-    tmp[tid] = FLOAT_TYPE(0.0f);
+    FLOAT_TYPE tmp[NUM_OUTPUTS] = {};
 
-    [[unroll]] for (uint i = 0; i < p.ncols/block_size; i += 2) {
-        const uint col = i*block_size + 2*tid;
-        const uint ib = (row*p.ncols + col)/QUANT_K; // block index
+    const uint unroll_count = 4;
+
+    // optimize some addressing math when block size matches QUANT_K
+    if (block_size == QUANT_K) {
+        uint col = 2*tid;
+        uint ib[NUM_OUTPUTS];
+        [[unroll]] for (uint n = 0; n < num_outputs; ++n) {
+            ib[n] = ((row + n)*p.ncols + col)/QUANT_K; // block index
+        }
         const uint iqs = (col%QUANT_K)/QUANT_R; // quant index
-        const uint iybs = col - col%QUANT_K; // y block start index
+        uint iybs = col - col%QUANT_K; // y block start index
+        uint32_t num_iter = p.ncols/block_size & ~(2*unroll_count - 1);
+        uint i = 0;
+        // manually partial unroll
+        while (i < num_iter) {
+            [[unroll]] for (uint j = 0; j < unroll_count; ++j) {
+                FLOAT_TYPE b0 = FLOAT_TYPE(data_b[b_offset + iybs + iqs]);
+                FLOAT_TYPE b1 = FLOAT_TYPE(data_b[b_offset + iybs + iqs + y_offset]);
 
-        vec2 v = dequantize(ib, iqs, a_offset / QUANT_K);
+                [[unroll]] for (uint n = 0; n < num_outputs; ++n) {
+                    vec2 v = dequantize(ib[n], iqs, a_offset / QUANT_K);
+                    // matrix multiplication
+                    tmp[n] = fma(FLOAT_TYPE(v.x), b0, fma(FLOAT_TYPE(v.y), b1, tmp[n]));
+                    ib[n] += 2;
+                }
 
-        // matrix multiplication
-        tmp[tid] = fma(FLOAT_TYPE(v.x), FLOAT_TYPE(data_b[b_offset + iybs + iqs]), fma(FLOAT_TYPE(v.y), FLOAT_TYPE(data_b[b_offset + iybs + iqs + y_offset]), tmp[tid]));
+                col += 2*block_size;
+                iybs += 2*block_size;
+                i += 2;
+            }
+        }
+        while (i < p.ncols/block_size) {
+            FLOAT_TYPE b0 = FLOAT_TYPE(data_b[b_offset + iybs + iqs]);
+            FLOAT_TYPE b1 = FLOAT_TYPE(data_b[b_offset + iybs + iqs + y_offset]);
+
+            [[unroll]] for (uint n = 0; n < num_outputs; ++n) {
+                vec2 v = dequantize(ib[n], iqs, a_offset / QUANT_K);
+                // matrix multiplication
+                tmp[n] = fma(FLOAT_TYPE(v.x), b0, fma(FLOAT_TYPE(v.y), b1, tmp[n]));
+                ib[n] += 2;
+            }
+
+            col += 2*block_size;
+            iybs += 2*block_size;
+            i += 2;
+        }
+    } else {
+        [[unroll]] for (uint i = 0; i < p.ncols/block_size; i += 2) {
+            const uint col = i*block_size + 2*tid;
+            uint ib[NUM_OUTPUTS];
+            [[unroll]] for (uint n = 0; n < num_outputs; ++n) {
+                ib[n] = ((row + n)*p.ncols + col)/QUANT_K; // block index
+            }
+            const uint iqs = (col%QUANT_K)/QUANT_R; // quant index
+            const uint iybs = col - col%QUANT_K; // y block start index
+
+            FLOAT_TYPE b0 = FLOAT_TYPE(data_b[b_offset + iybs + iqs]);
+            FLOAT_TYPE b1 = FLOAT_TYPE(data_b[b_offset + iybs + iqs + y_offset]);
+
+            [[unroll]] for (uint n = 0; n < num_outputs; ++n) {
+                vec2 v = dequantize(ib[n], iqs, a_offset / QUANT_K);
+                // matrix multiplication
+                tmp[n] = fma(FLOAT_TYPE(v.x), b0, fma(FLOAT_TYPE(v.y), b1, tmp[n]));
+            }
+        }
     }
 
-    // sum up partial sums and write back result
-    barrier();
-    [[unroll]] for (uint s = block_size/2; s > 0; s >>= 1) {
-        if (tid < s) {
-            tmp[tid] += tmp[tid + s];
-        }
-        barrier();
+    [[unroll]] for (uint n = 0; n < num_outputs; ++n) {
+        tmp[n] = subgroupAdd(tmp[n]);
     }
     if (tid == 0) {
-        data_d[d_offset + row] = D_TYPE(tmp[0]);
+        [[unroll]] for (uint n = 0; n < num_outputs; ++n) {
+            data_d[d_offset + row + n] = D_TYPE(tmp[n]);
+        }
+    }
+}
+
+void main() {
+    const uint row = NUM_OUTPUTS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+    if (row + NUM_OUTPUTS <= p.stride_d) {
+        compute_outputs(row, NUM_OUTPUTS);
+    } else {
+        compute_outputs(row, p.stride_d - NUM_OUTPUTS);
     }
 }
