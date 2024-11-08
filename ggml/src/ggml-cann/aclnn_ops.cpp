@@ -904,6 +904,7 @@ void ggml_cann_dup(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
         return;
     }
     // TODO: simplify
+    const size_t CANN_DUP_OP_SUPPORTED_MAX_ROWS = 65535;
     if (src->type == GGML_TYPE_F16) {
         if (dst->type == GGML_TYPE_Q8_0) {
             aclrtlaunch_ascendc_quantize_f16_q8_0(
@@ -931,7 +932,7 @@ void ggml_cann_dup(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
                 if (src->nb[0] == src_type_size) {
                     // src0 is contigous on first dimension, copy by rows
                     int64_t rows_num = ggml_nrows(src);
-
+                    GGML_ASSERT(rows_num <= CANN_DUP_OP_SUPPORTED_MAX_ROWS);
                     aclrtlaunch_ascendc_dup_by_rows_fp16(
                         rows_num, ctx.stream(), src->data, dst->data,
                         ((ggml_tensor*)src->extra)->ne,
@@ -956,6 +957,7 @@ void ggml_cann_dup(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
                 if (src->nb[0] == src_type_size) {
                     // src0 is contigous on first dimension, copy by rows
                     int64_t rows_num = ggml_nrows(src);
+                    GGML_ASSERT(rows_num <= CANN_DUP_OP_SUPPORTED_MAX_ROWS);
                     aclrtlaunch_ascendc_dup_by_rows_fp16_to_fp32(
                         rows_num, ctx.stream(), src->data, dst->data,
                         ((ggml_tensor*)src->extra)->ne,
@@ -999,6 +1001,7 @@ void ggml_cann_dup(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
                 if (src->nb[0] == src_type_size) {
                     // src0 is contigous on first dimension, copy by rows
                     int64_t rows_num = ggml_nrows(src);
+                    GGML_ASSERT(rows_num <= CANN_DUP_OP_SUPPORTED_MAX_ROWS);
                     aclrtlaunch_ascendc_dup_by_rows_fp32(
                         rows_num, ctx.stream(), src->data, dst->data,
                         ((ggml_tensor*)src->extra)->ne,
@@ -1025,6 +1028,7 @@ void ggml_cann_dup(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
                 if (src->nb[0] == src_type_size) {
                     // src0 is contigous on first dimension, copy by rows
                     int64_t rows_num = ggml_nrows(src);
+                    GGML_ASSERT(rows_num <= CANN_DUP_OP_SUPPORTED_MAX_ROWS);
                     aclrtlaunch_ascendc_dup_by_rows_fp32_to_fp16(
                         rows_num, ctx.stream(), src->data, dst->data,
                         ((ggml_tensor*)src->extra)->ne,
@@ -2312,15 +2316,26 @@ void ggml_cann_get_rows(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
 
     switch (src0->type) {
         case GGML_TYPE_F32:
-            aclrtlaunch_ascendc_get_row_f32(
-                24, ctx.stream(), src0->data, src1->data, dst->data,
-                ((ggml_tensor*)src0->extra)->ne,
-                ((ggml_tensor*)src0->extra)->nb,
-                ((ggml_tensor*)src1->extra)->ne,
-                ((ggml_tensor*)src1->extra)->nb, ((ggml_tensor*)dst->extra)->ne,
-                ((ggml_tensor*)dst->extra)->nb);
+            {
+                if ((src0->ne[0] % 8) != 0) {
+                    size_t dst_len = src1->ne[0] * src1->ne[1] * src1->ne[2] * src0->ne[0] * ggml_type_size(GGML_TYPE_F32);
+                    ACL_CHECK(aclrtMemset((char*)dst->data, dst_len, 0, dst_len));
+                }
+                aclrtlaunch_ascendc_get_row_f32(
+                    24, ctx.stream(), src0->data, src1->data, dst->data,
+                    ((ggml_tensor*)src0->extra)->ne,
+                    ((ggml_tensor*)src0->extra)->nb,
+                    ((ggml_tensor*)src1->extra)->ne,
+                    ((ggml_tensor*)src1->extra)->nb, ((ggml_tensor*)dst->extra)->ne,
+                    ((ggml_tensor*)dst->extra)->nb);
+            }
             break;
         case GGML_TYPE_F16:
+        {
+            if ((src0->ne[0] % 16) != 0) {
+                size_t dst_len = src1->ne[0] * src1->ne[1] * src1->ne[2] * src0->ne[0] * ggml_type_size(GGML_TYPE_F32); // out is also f32, even input is f16
+                ACL_CHECK(aclrtMemset((char*)dst->data, dst_len, 0, dst_len));
+            }
             aclrtlaunch_ascendc_get_row_f16(
                 24, ctx.stream(), src0->data, src1->data, dst->data,
                 ((ggml_tensor*)src0->extra)->ne,
@@ -2329,6 +2344,7 @@ void ggml_cann_get_rows(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
                 ((ggml_tensor*)src1->extra)->nb, ((ggml_tensor*)dst->extra)->ne,
                 ((ggml_tensor*)dst->extra)->nb);
             break;
+        }
         case GGML_TYPE_Q4_0:
             aclrtlaunch_ascendc_get_row_q4_0(
                 24, ctx.stream(), src0->data, src1->data, dst->data,

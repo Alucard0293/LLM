@@ -13,7 +13,7 @@ class GET_ROW_F32 {
                                 int64_t *indices_ne_ub, size_t *indices_nb_ub,
                                 int64_t *output_ne_ub, size_t *output_nb_ub) {
         int64_t op_block_num = GetBlockNum();
-        int64_t op_block_idx = GetBlockIdx();
+        op_block_idx = GetBlockIdx();
 
         for (int i = 0; i < 4; i++) {
             input_ne[i] = input_ne_ub[i];
@@ -51,36 +51,84 @@ class GET_ROW_F32 {
         // All data should asign to 32. It's ok because all data is align to 32.
         pipe.InitBuffer(input_queue, BUFFER_NUM, local_buffer_size);
         pipe.InitBuffer(output_queue, BUFFER_NUM, local_buffer_size);
+        // printf("f32 BLOCK_IDX:%d get_row: init: ir:%d, dr:%d, n_elements:%d.\n", op_block_idx, ir, dr, n_elements);
     }
 
     __aicore__ inline void copy_in(uint32_t offset, size_t len) {
+        size_t origin_len = len;
         LocalTensor<float> input_local = input_queue.AllocTensor<float>();
-        size_t tail = len % 32;
-        len = len & ~31;
-        DataCopy(input_local, input_gm[offset], len);
+        const size_t elem_per_block = 32 / sizeof(float);
+        size_t tail = len % elem_per_block;
+        len = len & ~(elem_per_block - 1);
+
+        //printf("f32 BLOCK_IDX:%d get_row: Copy_in: offset:%d, len:%d, origin_len:%d, tail:%d, elem_per_block:%d.\n", op_block_idx, offset, len, origin_len, tail, elem_per_block);
+        if (len > 0)
+            DataCopy(input_local, input_gm[offset], len);
+        //printf("f32 BLOCK_IDX:%d get_row: Copy_in executed: offset:%d, len:%d, origin_len:%d, tail:%d, elem_per_block:%d.\n", op_block_idx, offset, len, origin_len, tail, elem_per_block);
         if(tail != 0) {
+#if 1
+/*             //printf("f32 BLOCK_IDX:%d get_row: Copy_in ENTER tail != 0: offset:%d, len:%d, origin_len:%d, tail:%d, elem_per_block:%d.\n", op_block_idx, offset, len, origin_len, tail, elem_per_block);
+            for (int i = 0; i < elem_per_block; i++) {
+                printf("f32 BLOCK_IDX:%d get_row: Copy_in: get value idx:%d, origin input local val:%f.\n", op_block_idx, i, input_local[len + i].GetValue(0));
+            }
+            //DumpTensor(input_gm[offset + len], 5, elem_per_block);
+            for (int i = 0; i < tail; i++) {
+                printf("f32 BLOCK_IDX:%d get_row: Copy_in: get value idx:%d, input local val:%f, input_gm:%f.\n", op_block_idx, len + i, input_local[len + i].GetValue(0), input_gm[offset + len + i]);
+            } */
+            DataCopy(input_local[len], input_gm[offset + len], elem_per_block);
+            // clean
+/*             for (int i = tail; i < elem_per_block; i++) {
+                input_local[len + i].SetValue(0, 0);
+            }
+            for (int i = 0; i < elem_per_block; i++) {
+                printf("f32 BLOCK_IDX:%d get_row: Copy_in: get value idx:%d, after clean and copy, input local val:%f.\n", op_block_idx, i, input_local[len + i].GetValue(0));
+            }  */
+#endif
+#if 0
             DataCopyExtParams dataCopyParams;
             dataCopyParams.blockCount = 1;
             dataCopyParams.blockLen = tail * sizeof(float);
             DataCopyPadExtParams<float> padParams;
             DataCopyPad(input_local[len], input_gm[offset + len],
                         dataCopyParams, padParams);
+#endif
         }
         input_queue.EnQue(input_local);
     }
 
     __aicore__ inline void copy_out(uint32_t offset, size_t len) {
         LocalTensor<float> output_local = output_queue.DeQue<float>();
-        size_t tail = len % 32;
-        len = len & ~31;
-        DataCopy(output_gm[offset], output_local, len);
+        const size_t elem_per_block = 32 / sizeof(float);
+        size_t tail = len % elem_per_block;
+        len = len & ~(elem_per_block - 1);
+        if (len > 0) {
+            DataCopy(output_gm[offset], output_local, len);
+        }
+
+#if 1
         if(tail != 0) {
+            for (size_t i = tail; i < elem_per_block; i++) {
+                output_local[len + i].SetValue(0, 0);
+            }
+            //printf("\nf32 BLOCK_IDX:%d get_row: Copy_Out AtomicAdd: offset:%d, len:%d, tail:%d, elem_per_block:%d.\n", op_block_idx, offset, len, tail, elem_per_block);
+/*             DumpTensor(output_gm[offset + len], 5, elem_per_block);
+            DumpTensor(output_local[len], 5, elem_per_block); */
+            SetAtomicAdd<float>();
+            DataCopy(output_gm[offset + len], output_local[len], elem_per_block);
+            SetAtomicNone();
+/*             DumpTensor(output_gm[offset + len], 5, elem_per_block); */
+        }
+#endif
+#if 0
+        if(tail != 0) {
+
             DataCopyExtParams dataCopyParams;
             dataCopyParams.blockCount = 1;
             dataCopyParams.blockLen = tail * sizeof(float);
             DataCopyPad(output_gm[offset + len], output_local[len],
                         dataCopyParams);
         }
+#endif
         output_queue.FreeTensor(output_local);
     }
 
@@ -144,6 +192,7 @@ class GET_ROW_F32 {
     GlobalTensor<float> output_gm;
     TQue<QuePosition::VECIN, BUFFER_NUM> input_queue;
     TQue<QuePosition::VECOUT, BUFFER_NUM> output_queue;
+    int64_t op_block_idx;
 };
 
 template <typename T>
