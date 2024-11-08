@@ -1387,3 +1387,27 @@ jobs:
 #          popd
 #          emcmake cmake . -DCMAKE_BUILD_TYPE=${{ matrix.build }}
 #          make
+
+  ascendai-cann-latest-arrch64: 
+    runs-on: ubuntu-latest
+    container:
+      image: ascendai/cann
+
+    steps: 
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Dependencies
+        id: depends
+        run: |
+            apt-get update 
+            apt-get install cmake make build-essential -y
+    
+      - name: Build 
+        id: cmake-build
+        run: |
+            mkdir build
+            cd build
+            cmake .. -DCMAKE_BUILD_TYPE=release
+            cmake --build . --config Release -j $(nproc)
