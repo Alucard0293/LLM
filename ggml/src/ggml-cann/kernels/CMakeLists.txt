@@ -30,4 +30,12 @@ ascendc_library(ascendc_kernels STATIC
     ${SRC_FILES}
 )
 
+string(FIND "${SOC_VERSION}" "ascend310p" FIRST_310P_INDEX)
+if(FIRST_310P_INDEX GREATER -1)
+    ascendc_compile_definitions(ascendc_kernels PRIVATE -DASCEND_310P)
+    message(STATUS "Compile for Ascend310P.")
+else()
+    message(STATUS "Compile for Ascend910B.")
+endif()
+
 # ascendc_compile_definitions(ascendc_kernels PRIVATE -DASCENDC_DUMP)

@@ -51,23 +51,29 @@ class DupByRows {
 
     __aicore__ inline void copy_in() {
         LocalTensor<SRC_T> src_local = src_queue.AllocTensor<SRC_T>();
-
-        DataCopyExtParams dataCopyParams;
-        dataCopyParams.blockCount = 1;
-        dataCopyParams.blockLen = num_elem * sizeof(SRC_T);
-        DataCopyPadExtParams<SRC_T> padParams;
-        DataCopyPad(src_local, src_gm, dataCopyParams, padParams);
-
+        const size_t elem_per_block = 32 / sizeof(SRC_T);
+        size_t tail = num_elem % elem_per_block;
+        size_t cpy_elements_len = tail > 0 ? num_elem + 1 : num_elem;
+        DataCopy(src_local, src_gm, cpy_elements_len);
         src_queue.EnQue(src_local);
     }
 
     __aicore__ inline void copy_out() {
         LocalTensor<DST_T> dst_local = dst_queue.DeQue<DST_T>();
-
-        DataCopyExtParams dataCopyParams;
-        dataCopyParams.blockCount = 1;
-        dataCopyParams.blockLen = num_elem * sizeof(DST_T);
-        DataCopyPad(dst_gm, dst_local, dataCopyParams);
+        const size_t elem_per_block = 32 / sizeof(DST_T);
+        size_t tail = num_elem % elem_per_block;
+        size_t len = num_elem & ~(elem_per_block - 1);
+        if (len > 0) {
+            DataCopy(dst_gm, dst_local, len);
+        }
+        if(tail != 0) {
+            for (size_t i = tail; i < elem_per_block; i++) {
+                dst_local[len + i].SetValue(0, 0);
+            }
+            SetAtomicAdd<float>();
+            DataCopy(dst_gm[len], dst_local[len], elem_per_block);
+            SetAtomicNone();
+        }
 
         dst_queue.FreeTensor(dst_local);
     }
