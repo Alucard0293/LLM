@@ -874,6 +874,10 @@ ggml/src/ggml-cuda/%.o: \
 	$(HIPCC) $(CXXFLAGS) $(HIPFLAGS) -x hip -c -o $@ $<
 endif # GGML_HIPBLAS
 
+ifndef GGML_NO_CPU_AARCH64
+	MK_CPPFLAGS += -DGGML_USE_CPU_AARCH64
+endif
+
 ifdef GGML_METAL
 	MK_CPPFLAGS += -DGGML_USE_METAL
 	MK_LDFLAGS  += -framework Foundation -framework Metal -framework MetalKit
@@ -887,7 +891,7 @@ ifdef GGML_METAL_NDEBUG
 endif
 ifdef GGML_METAL_EMBED_LIBRARY
 	MK_CPPFLAGS += -DGGML_METAL_EMBED_LIBRARY
-	OBJ_GGML   += ggml/src/ggml-metal-embed.o
+	OBJ_GGML    += ggml/src/ggml-metal-embed.o
 endif
 endif # GGML_METAL
 

@@ -2239,15 +2239,104 @@ ggml_backend_buffer_type_t ggml_backend_cpu_hbm_buffer_type(void) {
 }
 #endif
 
-static ggml_backend_buffer_type_t * ggml_backend_cpu_get_extra_bufts(ggml_backend_dev_t device) {
-    static ggml_backend_buffer_type_t bufts[] = {
-#ifdef GGML_USE_CPU_HBM
-        ggml_backend_cpu_hbm_buffer_type(),
+// buffer type AARCH64
+
+#ifdef __GNUC__
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wpedantic"
 #endif
-        NULL
+
+#include "ggml-aarch64.h"
+
+#ifdef __GNUC__
+    #pragma GCC diagnostic pop
+#endif
+
+static void ggml_backend_cpu_aarch64_buffer_init_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor) {
+    tensor->extra = (void *)ggml_aarch64_get_optimal_repack_type(tensor); // NOLINT
+
+    GGML_UNUSED(buffer);
+}
+
+static void ggml_backend_cpu_aarch64_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+    GGML_ASSERT(offset == 0);
+    GGML_ASSERT(size == ggml_nbytes(tensor));
+
+    enum ggml_type repack_type = (enum ggml_type)(intptr_t)tensor->extra;
+
+    ggml_aarch64_repack_tensor(tensor, repack_type, data, size);
+
+    GGML_UNUSED(buffer);
+}
+
+static const struct ggml_backend_buffer_i ggml_backend_cpu_aarch64_buffer_i = {
+    /* .free_buffer     = */ ggml_backend_cpu_buffer_free_buffer,
+    /* .get_base        = */ ggml_backend_cpu_buffer_get_base,
+    /* .init_tensor     = */ ggml_backend_cpu_aarch64_buffer_init_tensor,
+    /* .memset_tensor   = */ ggml_backend_cpu_buffer_memset_tensor,
+    /* .set_tensor      = */ ggml_backend_cpu_aarch64_buffer_set_tensor,
+    /* .get_tensor      = */ NULL,
+    /* .cpy_tensor      = */ NULL,
+    /* .clear           = */ ggml_backend_cpu_buffer_clear,
+    /* .reset           = */ NULL,
+};
+
+static const char * ggml_backend_cpu_aarch64_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
+    return "CPU_AARCH64";
+
+    GGML_UNUSED(buft);
+}
+
+static ggml_backend_buffer_t ggml_backend_cpu_aarch64_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
+    void * data = ggml_aligned_malloc(size);
+
+    if (data == NULL) {
+        GGML_LOG_ERROR("%s: failed to allocate buffer of size %zu\n", __func__, size);
+        return NULL;
+    }
+
+    return ggml_backend_buffer_init(buft, ggml_backend_cpu_aarch64_buffer_i, data, size);
+}
+
+ggml_backend_buffer_type_t ggml_backend_cpu_aarch64_buffer_type(void) {
+    static struct ggml_backend_buffer_type ggml_backend_cpu_buffer_type_aarch64 = {
+        /* .iface    = */ {
+            /* .get_name         = */ ggml_backend_cpu_aarch64_buffer_type_get_name,
+            /* .alloc_buffer     = */ ggml_backend_cpu_aarch64_buffer_type_alloc_buffer,
+            /* .get_alignment    = */ ggml_backend_cpu_buffer_type_get_alignment,
+            /* .get_max_size     = */ NULL, // defaults to SIZE_MAX
+            /* .get_alloc_size   = */ NULL, // defaults to ggml_nbytes
+            /* .is_host          = */ NULL,
+        },
+        /* .device  = */ ggml_backend_reg_dev_get(ggml_backend_cpu_reg(), 0),
+        /* .context = */ NULL,
     };
 
-    return bufts;
+    return &ggml_backend_cpu_buffer_type_aarch64;
+}
+
+bool ggml_backend_cpu_buft_is_aarch64(ggml_backend_buffer_type_t buft) {
+    return buft == ggml_backend_cpu_aarch64_buffer_type();
+}
+
+static ggml_backend_buffer_type_t * ggml_backend_cpu_get_extra_bufts(ggml_backend_dev_t device) {
+    static std::vector<ggml_backend_buffer_type_t> bufts = []() {
+        std::vector<ggml_backend_buffer_type_t> bufts;
+
+#ifdef GGML_USE_CPU_HBM
+        bufts.push_back(ggml_backend_cpu_hbm_buffer_type());
+#endif
+
+#ifdef GGML_USE_CPU_AARCH64
+        bufts.push_back(ggml_backend_cpu_aarch64_buffer_type());
+#endif
+
+        bufts.push_back(NULL);
+
+        return bufts;
+    }();
+
+    return bufts.data();
 
     GGML_UNUSED(device);
 }
@@ -2558,6 +2647,21 @@ static ggml_backend_buffer_t ggml_backend_cpu_device_buffer_from_host_ptr(ggml_b
 }
 
 static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+    const struct ggml_tensor * src0 = op->src[0];
+    const struct ggml_tensor * src1 = op->src[1];
+
+    if (src0 && src0->buffer && ggml_backend_cpu_buft_is_aarch64(src0->buffer->buft)) {
+        if (op->op != GGML_OP_MUL_MAT || src0->type != GGML_TYPE_Q4_0 || ggml_aarch64_get_optimal_repack_type(src0) == GGML_TYPE_Q4_0) {
+            return false;
+        }
+    }
+
+    for (int i = 1; i < GGML_MAX_SRC; i++) {
+        if (op->src[i] && op->src[i]->buffer && ggml_backend_cpu_buft_is_aarch64(op->src[i]->buffer->buft)) {
+            return false;
+        }
+    }
+
     switch (op->op) {
         case GGML_OP_CPY:
             return
@@ -2566,13 +2670,13 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
                 op->type != GGML_TYPE_IQ1_S   &&
                 op->type != GGML_TYPE_IQ1_M; // missing type_traits.from_float
         case GGML_OP_MUL_MAT:
-            return op->src[1]->type == GGML_TYPE_F32;// FIXME || op->src[1]->type == ggml_get_type_traits(op->src[0]->type)->vec_dot_type;
+            return src1->type == GGML_TYPE_F32 || src1->type == ggml_get_type_traits_cpu(src0->type)->vec_dot_type;
         case GGML_OP_ROPE_BACK:
             return op->src[2] == NULL && (op->op_params[2] & 4) == 0;
         case GGML_OP_IM2COL_BACK:
-            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
+            return src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32;
         case GGML_OP_OUT_PROD:
-            return (op->src[0]->type == GGML_TYPE_F32 || ggml_is_quantized(op->src[0]->type)) && op->src[1]->type == GGML_TYPE_F32;
+            return (src0->type == GGML_TYPE_F32 || ggml_is_quantized(src0->type)) && src1->type == GGML_TYPE_F32;
         default:
             return true;
     }
@@ -2581,7 +2685,7 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
 }
 
 static bool ggml_backend_cpu_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
-    return ggml_backend_buft_is_host(buft);
+    return ggml_backend_buft_is_host(buft) || ggml_backend_cpu_buft_is_aarch64(buft);
 
     GGML_UNUSED(dev);
 }
@@ -2652,6 +2756,9 @@ static const struct ggml_backend_reg_i ggml_backend_cpu_reg_i = {
 };
 
 ggml_backend_reg_t ggml_backend_cpu_reg(void) {
+    // init CPU feature detection
+    ggml_cpu_init();
+
     static struct ggml_backend_reg ggml_backend_cpu_reg = {
         /* .iface   = */ ggml_backend_cpu_reg_i,
         /* .context = */ NULL,
