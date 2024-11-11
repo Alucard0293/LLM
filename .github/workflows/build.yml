@@ -1388,12 +1388,12 @@ jobs:
 #          emcmake cmake . -DCMAKE_BUILD_TYPE=${{ matrix.build }}
 #          make
 
-  ascendai-cann-latest-arrch64: 
+  ascendai-cann-latest-arrch64:
     runs-on: ubuntu-latest
     container:
       image: ascendai/cann
 
-    steps: 
+    steps:
       - name: Clone
         id: checkout
         uses: actions/checkout@v4
@@ -1401,10 +1401,10 @@ jobs:
       - name: Dependencies
         id: depends
         run: |
-            apt-get update 
+            apt-get update
             apt-get install cmake make build-essential -y
-    
-      - name: Build 
+
+      - name: Build
         id: cmake-build
         run: |
             mkdir build
