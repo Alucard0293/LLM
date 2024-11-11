@@ -1,0 +1,14 @@
+#version 450
+
+#include "types.comp"
+#include "generic_unary_head.comp"
+
+void main() {
+    const uint idx = get_idx();
+
+    if (idx >= p.ne / 4) {
+        return;
+    }
+
+    data_d[idx] = D_TYPE(data_a[idx]);
+}
